@@ -16,6 +16,8 @@
         body {
             margin: 0;
             padding: 0;
+            /* Отступ снизу, чтобы баннер ВК не перекрывал кнопки */
+            padding-bottom: 100px; 
             font-family: 'Oswald', sans-serif;
             background-color: #f0ead6; 
             color: #1a1a1a;
@@ -25,6 +27,7 @@
             height: 100vh;
             user-select: none;
             overflow: hidden;
+            position: relative;
         }
 
         .screen {
@@ -346,6 +349,9 @@ const CARTOONS = [
 ];
 
 const adService = {
+    checkInterval: null,
+    isRewardReady: false,
+
     init: function() {
         console.log("AdService Init...");
         vkBridge.send('VKWebAppInit')
@@ -359,13 +365,57 @@ const adService = {
         game.setLanguage(lang);
         
         this.loadScore();
+
+        // --- БАННЕРНАЯ РЕКЛАМА ---
+        this.showBanner();
+
+        // --- ПРЕДЗАГРУЗКА REWARD (ПО ТАЙМЕРУ) ---
+        // Первый вызов сразу
+        this.preloadRewardAd();
+        // Ставим интервал проверки каждые 30 секунд
+        this.checkInterval = setInterval(() => {
+            this.preloadRewardAd();
+        }, 30000); 
+    },
+
+    showBanner: function() {
+        vkBridge.send("VKWebAppShowBannerAd", {
+            banner_location: "bottom"
+        })
+        .then((data) => { 
+            if (data.result) {
+                console.log("Banner shown");
+            }
+        })
+        .catch((error) => {
+            console.log("Banner error", error);
+        });
+    },
+
+    preloadRewardAd: function() {
+        // Эта функция просто "стучится" в ВК, чтобы подгрузить рекламу в кэш.
+        // Она НЕ показывает рекламу пользователю.
+        if (this.isRewardReady) return; // Если уже загружено, не спамим
+
+        console.log("Preloading Reward Ad...");
+        vkBridge.send("VKWebAppCheckNativeAds", { ad_format: "reward" })
+            .then((data) => {
+                if (data.result) {
+                    this.isRewardReady = true;
+                    console.log("Reward Ad is ready!");
+                } else {
+                    this.isRewardReady = false;
+                }
+            })
+            .catch((error) => {
+                console.log("Preload Error (skip):", error);
+                this.isRewardReady = false;
+            });
     },
     
     showInterstitial: function(callback) {
-        console.log("Попытка показа рекламы (Interstitial)...");
+        console.log("Showing Interstitial...");
         let adFinished = false;
-
-        // Запускает игру, но только один раз
         const runGameOnce = () => {
             if (!adFinished) {
                 adFinished = true;
@@ -373,48 +423,42 @@ const adService = {
             }
         };
 
-        // Запасной вариант: если ВК не ответил за 1.5 секунды, запускаем игру
         setTimeout(() => {
-            if (!adFinished) {
-                console.warn("Таймаут рекламы (локальный запуск?), игра начинается.");
-                runGameOnce();
-            }
+            if (!adFinished) runGameOnce();
         }, 1500);
 
-        // Запрос к ВК
         vkBridge.send("VKWebAppShowNativeAds", { ad_format: "interstitial" })
             .then(() => runGameOnce())
             .catch(() => runGameOnce());
     },
 
     showReward: function() {
-        console.log("Проверка доступности Reward видео...");
+        console.log("Button clicked. Showing Reward...");
         
-        // 1. Сначала проверяем, есть ли реклама (чтобы не получать ошибку)
-        vkBridge.send("VKWebAppCheckNativeAds", { ad_format: "reward" })
-            .then((checkData) => {
-                if (checkData.result) {
-                    // 2. Реклама есть, пытаемся показать
-                    vkBridge.send("VKWebAppShowNativeAds", { ad_format: "reward" })
-                        .then(nativeData => {
-                            if (nativeData.result) {
-                                game.revive(); // Награда выдана
-                            } else {
-                                console.log("Реклама закрыта без просмотра");
-                            }
-                        })
-                        .catch(error => {
-                            console.error("Ошибка при показе:", error);
-                            // Здесь не показываем алерт, просто пишем в консоль
-                        });
+        // Здесь мы уже НЕ вызываем CheckNativeAds, так как это сделано заранее (preloadRewardAd).
+        // Мы сразу пытаемся показать то, что загрузилось.
+        
+        vkBridge.send("VKWebAppShowNativeAds", { ad_format: "reward" })
+            .then(nativeData => {
+                if (nativeData.result) {
+                    game.revive(); // Успех
+                    // Сбрасываем флаг, чтобы таймер начал искать новую рекламу для следующего раза
+                    this.isRewardReady = false;
                 } else {
-                    console.log("Нет доступной рекламы в данный момент");
-                    alert("Реклама сейчас недоступна. Попробуйте позже или зайдите с телефона.");
+                    console.log("Реклама закрыта без просмотра");
                 }
             })
-            .catch((error) => {
-                console.error("Ошибка проверки рекламы (вероятно, AdBlock или ПК):", error);
-                alert("Не удалось загрузить рекламу. Если вы с компьютера или включен AdBlock, видео может не работать.");
+            .catch(error => {
+                console.error("Show Error:", error);
+                
+                // Если произошла ошибка (например, реклама не успела загрузиться), 
+                // можно попробовать один раз форсированно проверить и показать
+                // но лучше просто сообщить пользователю:
+                if (!this.isRewardReady) {
+                     alert("Реклама еще загружается или недоступна. Попробуйте через пару секунд.");
+                } else {
+                     alert("Не удалось показать рекламу. Возможно, AdBlock или ПК версия.");
+                }
             });
     },
 
@@ -441,7 +485,6 @@ const adService = {
                 }
             }
         }).catch(error => {
-            console.log("StorageGet Error, используем локальное:", error);
             const local = localStorage.getItem('sovietQuizHighScore');
             if(local) game.highScore = parseInt(local);
             game.updateHighScoreUI();
@@ -611,4 +654,4 @@ window.onload = function() {
 };
 </script>
 </body>
-</html>
+                </html>
